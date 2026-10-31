@@ -65,6 +65,8 @@ let stopTimeListener = null;
 let ffmpeg = null;
 let ffmpegLoading = null;
 let sourceFile = null;
+let loadedSourceFile = null;
+let extractionBusy = false;
 let downloadUrls = [];
 let sourceInputName = "video_input";
 let outputExtension = "mp4";
@@ -212,16 +214,22 @@ function previsualizarParte(start, end) {
   player.addEventListener("timeupdate", stopTimeListener);
 }
 async function gravarParte(start, end, partNum, btn) {
+  if (extractionBusy) { setStatus("Aguarde: outra parte já está sendo extraída."); return; }
   if (!sourceFile) { alert("Selecione e analise o vídeo novamente."); return; }
+  extractionBusy = true;
   const originalText = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Preparando...";
   try {
     const engine = await loadFFmpeg();
-    setStatus("Preparando o arquivo original para o corte...");
     sourceInputName = "smartsplit_input." + outputExtension;
-    const inputData = new Uint8Array(await sourceFile.arrayBuffer());
-    await engine.writeFile(sourceInputName, inputData);
+    if (loadedSourceFile !== sourceFile) {
+      setStatus("Carregando o vídeo original uma única vez na memória de corte...");
+      try { await engine.deleteFile(sourceInputName); } catch (_) {}
+      const inputData = new Uint8Array(await sourceFile.arrayBuffer());
+      await engine.writeFile(sourceInputName, inputData);
+      loadedSourceFile = sourceFile;
+    }
     const outputName = "smartsplit_parte_" + partNum + "." + outputExtension;
     try { await engine.deleteFile(outputName); } catch (_) {}
     const duration = Math.max(.1, end - start);
@@ -249,6 +257,12 @@ async function gravarParte(start, end, partNum, btn) {
     link.textContent = "⬇ Baixar parte " + partNum;
     link.style.textAlign = "center";
     link.style.textDecoration = "none";
+    link.addEventListener("click", () => {
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+        downloadUrls = downloadUrls.filter(item => item !== url);
+      }, 120000);
+    }, { once: true });
     btn.replaceWith(link);
     try { await engine.deleteFile(outputName); } catch (_) {}
     setStatus("Parte " + partNum + " pronta. Toque no botão verde 'Baixar parte " + partNum + "' para salvar no aparelho.");
@@ -258,6 +272,7 @@ async function gravarParte(start, end, partNum, btn) {
     btn.textContent = "Tentar novamente";
   } finally {
     btn.disabled = false;
+    extractionBusy = false;
     if (btn.textContent !== "Concluído ✓" && btn.textContent !== "Tentar novamente") btn.textContent = originalText;
   }
 }
