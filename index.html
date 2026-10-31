@@ -65,6 +65,7 @@ let stopTimeListener = null;
 let ffmpeg = null;
 let ffmpegLoading = null;
 let sourceFile = null;
+let downloadUrls = [];
 let sourceInputName = "video_input";
 let outputExtension = "mp4";
 let outputMime = "video/mp4";
@@ -100,7 +101,7 @@ async function loadFFmpeg() {
     instance.on("log", ({ message }) => {
       if (message && /error|invalid|failed/i.test(message)) setStatus("FFmpeg: " + message.slice(-220));
     });
-    const base = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
+    const base = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm";
     await instance.load({
       coreURL: await toBlobURL(base + "/ffmpeg-core.js", "text/javascript"),
       wasmURL: await toBlobURL(base + "/ffmpeg-core.wasm", "application/wasm")
@@ -233,7 +234,6 @@ async function gravarParte(start, end, partNum, btn) {
       "-map", "0:a?",
       "-c", "copy",
       "-avoid_negative_ts", "make_zero",
-      "-movflags", "+faststart",
       outputName
     ]);
     if (result !== 0) throw new Error("O FFmpeg não conseguiu cortar este trecho. Pode haver incompatibilidade de formato ou codec.");
@@ -241,16 +241,18 @@ async function gravarParte(start, end, partNum, btn) {
     if (!data || !data.length) throw new Error("O arquivo extraído ficou vazio.");
     const blob = new Blob([data], { type: outputMime });
     const url = URL.createObjectURL(blob);
+    downloadUrls.push(url);
     const link = document.createElement("a");
+    link.className = "btn-small btn-download";
     link.href = url;
     link.download = "SmartSplit_parte_" + partNum + "." + outputExtension;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 120000);
+    link.textContent = "⬇ Baixar parte " + partNum;
+    link.style.textAlign = "center";
+    link.style.textDecoration = "none";
+    btn.replaceWith(link);
     try { await engine.deleteFile(outputName); } catch (_) {}
-    setStatus("Parte " + partNum + " extraída. O arquivo foi enviado para os downloads do aparelho.");
-    btn.textContent = "Concluído ✓";
+    setStatus("Parte " + partNum + " pronta. Toque no botão verde 'Baixar parte " + partNum + "' para salvar no aparelho.");
+    btn.textContent = "Arquivo pronto ✓";
   } catch (error) {
     setStatus("Falha na extração: " + (error.message || error) + "\nTente um vídeo MP4 comum e mantenha esta página aberta.");
     btn.textContent = "Tentar novamente";
@@ -262,6 +264,7 @@ async function gravarParte(start, end, partNum, btn) {
 analyzeBtn.addEventListener("click", iniciarAnalise);
 window.addEventListener("beforeunload", () => {
   if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
+  downloadUrls.forEach(url => URL.revokeObjectURL(url));
 });
 </script>
 </body>
