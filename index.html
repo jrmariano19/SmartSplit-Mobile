@@ -33,7 +33,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <body>
 <main class="container">
 <h1>SmartSplit Mobile</h1>
-<p class="subtitle">Análise de cenas e corte direto do vídeo original</p>
+<p class="subtitle">Análise de cenas e corte direto do vídeo original · v1.2.0</p>
 <div class="form-group">
 <label for="videoFile">Selecione o vídeo:</label>
 <input type="file" id="videoFile" accept="video/*">
@@ -52,6 +52,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <button class="main-btn" id="analyzeBtn">Analisar e Dividir</button>
 <div id="progressBox" class="progress-box" role="status" aria-live="polite"></div>
 <video id="previewPlayer" controls playsinline></video>
+<p id="previewNotice" class="note" hidden>O navegador não abriu a prévia. A análise e a extração continuam pelo FFmpeg, preservando o arquivo original.</p>
 <div class="results" id="resultsContainer"></div>
 <canvas id="procCanvas" width="64" height="36" style="display:none"></canvas>
 <p class="note">A primeira extração carrega o mecanismo FFmpeg (cerca de 31 MB). O corte usa cópia dos fluxos originais, sem regravar a reprodução. O tempo e a precisão do ponto de corte podem variar conforme os keyframes do vídeo e a memória do celular.</p>
@@ -67,6 +68,10 @@ let ffmpegLoading = null;
 let sourceFile = null;
 let loadedSourceFile = null;
 let extractionBusy = false;
+let analysisBusy = false;
+let previewAvailable = false;
+let sourceMounted = false;
+let loadedSourcePath = null;
 let downloadUrls = [];
 let sourceInputName = "video_input";
 let outputExtension = "mp4";
@@ -75,6 +80,30 @@ let outputMime = "video/mp4";
 const $ = (id) => document.getElementById(id);
 const progressBox = $("progressBox");
 const analyzeBtn = $("analyzeBtn");
+
+function updateControls() {
+  const busy = analysisBusy || extractionBusy;
+  [analyzeBtn, $("videoFile"), $("partsCount"), $("mode")].forEach(el => { el.disabled = busy; });
+  document.querySelectorAll("button.btn-download").forEach(el => { el.disabled = busy; });
+  document.querySelectorAll("button.btn-preview").forEach(el => { el.disabled = busy || !previewAvailable; });
+}
+function clearPreview() {
+  const player = $("previewPlayer");
+  player.pause();
+  if (stopTimeListener) player.removeEventListener("timeupdate", stopTimeListener);
+  stopTimeListener = null;
+  player.removeAttribute("src");
+  player.load();
+  player.style.display = "none";
+  previewAvailable = false;
+  if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
+  currentVideoUrl = null;
+}
+function clearDownloads() {
+  downloadUrls.forEach(url => URL.revokeObjectURL(url));
+  downloadUrls = [];
+  $("resultsContainer").innerHTML = "";
+}
 
 function setStatus(message) {
   progressBox.style.display = "block";
@@ -100,21 +129,126 @@ async function loadFFmpeg() {
   ffmpegLoading = (async () => {
     setStatus("Preparando o mecanismo de corte FFmpeg. Na primeira vez, será necessário baixar cerca de 31 MB...");
     const instance = new FFmpeg();
-    instance.on("log", ({ message }) => {
-      if (message && /error|invalid|failed/i.test(message)) setStatus("FFmpeg: " + message.slice(-220));
-    });
     const base = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm";
-    await instance.load({
-      coreURL: await toBlobURL(base + "/ffmpeg-core.js", "text/javascript"),
-      wasmURL: await toBlobURL(base + "/ffmpeg-core.wasm", "application/wasm")
-    });
+    const urls = [];
+    try {
+      urls.push(await toBlobURL(base + "/ffmpeg-core.js", "text/javascript"));
+      urls.push(await toBlobURL(base + "/ffmpeg-core.wasm", "application/wasm"));
+      await instance.load({ coreURL: urls[0], wasmURL: urls[1] });
+    } catch (error) {
+      instance.terminate();
+      throw new Error("Não foi possível carregar o FFmpeg. Verifique a conexão e tente novamente. " + (error.message || error));
+    } finally {
+      urls.forEach(url => URL.revokeObjectURL(url));
+    }
     ffmpeg = instance;
     return ffmpeg;
   })();
   try { return await ffmpegLoading; }
   finally { ffmpegLoading = null; }
 }
+async function prepareSource() {
+  const engine = await loadFFmpeg();
+  if (loadedSourceFile === sourceFile) return engine;
+  if (loadedSourceFile) {
+    if (sourceMounted) await engine.unmount("/source");
+    else if (loadedSourcePath) await engine.deleteFile(loadedSourcePath);
+  }
+  loadedSourceFile = null;
+  loadedSourcePath = null;
+  sourceMounted = false;
+  setStatus("Abrindo o vídeo original no FFmpeg...");
+  // WORKERFS reads the File on demand instead of copying hundreds of MB into MEMFS.
+  try {
+    try { await engine.createDir("/source"); } catch (_) {}
+    const mounted = await engine.mount("WORKERFS", { files: [sourceFile] }, "/source");
+    if (!mounted) throw new Error("WORKERFS indisponível.");
+    sourceMounted = true;
+    sourceInputName = "/source/" + sourceFile.name;
+  } catch (_) {
+    sourceInputName = "smartsplit_input." + outputExtension;
+    await engine.writeFile(sourceInputName, new Uint8Array(await sourceFile.arrayBuffer()));
+  }
+  loadedSourcePath = sourceInputName;
+  loadedSourceFile = sourceFile;
+  return engine;
+}
+async function readBrowserMetadata(player, file) {
+  clearPreview();
+  currentVideoUrl = URL.createObjectURL(file);
+  await new Promise((resolve, reject) => {
+    const finish = (error) => {
+      clearTimeout(timer);
+      player.removeEventListener("loadedmetadata", onLoaded);
+      player.removeEventListener("error", onError);
+      error ? reject(error) : resolve();
+    };
+    const onLoaded = () => finish();
+    const onError = () => finish(new Error("A prévia não abriu neste navegador."));
+    const timer = setTimeout(() => finish(new Error("Tempo limite da prévia.")), 15000);
+    player.addEventListener("loadedmetadata", onLoaded, { once: true });
+    player.addEventListener("error", onError, { once: true });
+    // Register listeners before setting src: cached metadata may arrive immediately.
+    player.src = currentVideoUrl;
+    player.load();
+  });
+  if (!Number.isFinite(player.duration) || player.duration <= 0) throw new Error("Duração indisponível na prévia.");
+  previewAvailable = true;
+  player.style.display = "block";
+  return player.duration;
+}
+async function readFFmpegDuration() {
+  const engine = await prepareSource();
+  setStatus("Identificando a duração pelo FFmpeg...");
+  let duration = null;
+  const onLog = ({ message }) => {
+    const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(message || "");
+    if (match) duration = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+  };
+  engine.on("log", onLog);
+  try {
+    const code = await engine.exec(["-i", sourceInputName, "-map", "0:v:0", "-t", "0", "-an", "-c:v", "copy", "-f", "null", "-"]);
+    if (code !== 0 || !Number.isFinite(duration) || duration <= 0) throw new Error("O FFmpeg não conseguiu identificar um vídeo com duração válida.");
+    return duration;
+  } finally {
+    engine.off("log", onLog);
+  }
+}
+function sceneWindow(target, duration, interval) {
+  const radius = Math.min(4, duration * .05, interval * .4);
+  return { start: Math.max(0, target - radius), end: Math.min(duration, target + radius) };
+}
+async function findFFmpegSceneCut(target, duration, interval) {
+  const engine = await prepareSource();
+  const { start, end } = sceneWindow(target, duration, interval);
+  const name = "smartsplit_scene.gray";
+  try {
+    const code = await engine.exec([
+      "-ss", String(start), "-i", sourceInputName, "-t", String(end - start),
+      "-map", "0:v:0", "-an", "-sn", "-dn",
+      "-vf", "fps=2,scale=64:36,format=gray", "-threads", "1", "-f", "rawvideo", name
+    ]);
+    if (code !== 0) throw new Error("Não foi possível analisar as cenas pelo FFmpeg. Tente o critério Duração igual.");
+    const frames = await engine.readFile(name);
+    const frameSize = 64 * 36;
+    const count = Math.floor(frames.length / frameSize);
+    if (!count) throw new Error("O FFmpeg não conseguiu ler os quadros. Tente o critério Duração igual.");
+    let best = target, maxDiff = -1;
+    for (let frame = 1; frame < count; frame++) {
+      let diff = 0;
+      for (let pixel = 0; pixel < frameSize; pixel += 4) {
+        diff += Math.abs(frames[frame * frameSize + pixel] - frames[(frame - 1) * frameSize + pixel]);
+      }
+      const time = start + frame / 2;
+      if (time < end && diff > maxDiff) { maxDiff = diff; best = time; }
+    }
+    return best;
+  } finally {
+    try { await engine.deleteFile(name); } catch (_) {}
+  }
+}
 async function iniciarAnalise() {
+  if (analysisBusy || extractionBusy) return;
   const file = $("videoFile").files[0];
   const partsCount = Math.max(2, Math.min(20, parseInt($("partsCount").value, 10) || 2));
   const mode = $("mode").value;
@@ -122,60 +256,73 @@ async function iniciarAnalise() {
   if (!file) { alert("Selecione um vídeo primeiro."); return; }
   sourceFile = file;
   getOutputFormat(file);
-  $("resultsContainer").innerHTML = "";
-  analyzeBtn.disabled = true;
+  clearDownloads();
+  analysisBusy = true;
+  updateControls();
+  $("previewNotice").hidden = true;
   setStatus("Lendo o vídeo: " + file.name + " (" + (file.size / 1048576).toFixed(1) + " MB)...");
   try {
-    if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
-    currentVideoUrl = URL.createObjectURL(file);
-    player.src = currentVideoUrl;
-    player.style.display = "block";
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Tempo limite ao ler os metadados do vídeo.")), 15000);
-      player.onloadedmetadata = () => { clearTimeout(timer); resolve(); };
-      player.onerror = () => { clearTimeout(timer); reject(new Error("O navegador não conseguiu ler este formato de vídeo.")); };
-    });
-    const duration = player.duration;
-    if (!Number.isFinite(duration) || duration <= 0) throw new Error("Não foi possível identificar a duração.");
+    let duration;
+    let useFFmpeg = false;
+    try {
+      duration = await readBrowserMetadata(player, file);
+    } catch (_) {
+      clearPreview();
+      $("previewNotice").hidden = false;
+      useFFmpeg = true;
+      duration = await readFFmpegDuration();
+    }
     const interval = duration / partsCount;
     const cutPoints = [0];
     for (let i = 1; i < partsCount; i++) {
       let target = i * interval;
       if (mode === "scene") {
-        setStatus("Analisando mudanças de cena: " + i + " de " + (partsCount - 1) + "...");
-        target = await findBestSceneCut(player, target, duration);
+        setStatus("Analisando mudanças de cena" + (useFFmpeg ? " pelo FFmpeg" : "") + ": " + i + " de " + (partsCount - 1) + "...");
+        if (!useFFmpeg) {
+          try {
+            target = await findBestSceneCut(player, target, duration, interval);
+          } catch (_) {
+            useFFmpeg = true;
+            clearPreview();
+            $("previewNotice").hidden = false;
+          }
+        }
+        if (useFFmpeg) target = await findFFmpegSceneCut(i * interval, duration, interval);
       }
       cutPoints.push(target);
     }
     cutPoints.push(duration);
     renderizarResultados(cutPoints);
-    setStatus("Análise concluída. " + partsCount + " partes prontas para extração.");
+    setStatus("Análise concluída" + (useFFmpeg ? " pelo FFmpeg" : "") + ". " + partsCount + " partes prontas para extração.");
   } catch (error) {
     setStatus("Não foi possível analisar: " + (error.message || error));
   } finally {
-    analyzeBtn.disabled = false;
+    analysisBusy = false;
+    updateControls();
   }
 }
-async function findBestSceneCut(video, targetSec, totalDuration) {
+async function findBestSceneCut(video, targetSec, totalDuration, interval) {
   const canvas = $("procCanvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const windowSize = Math.min(4, totalDuration * .05);
-  const start = Math.max(.5, targetSec - windowSize);
-  const end = Math.min(totalDuration - .5, targetSec + windowSize);
+  const { start, end } = sceneWindow(targetSec, totalDuration, interval);
   let bestTime = targetSec, maxDiff = -1, previous = null;
   for (let t = start; t <= end; t += .5) {
-    video.currentTime = t;
     await new Promise((resolve, reject) => {
+      if (video.readyState >= 2 && Math.abs(video.currentTime - t) < .001) { resolve(); return; }
       let done = false;
       const finish = (err) => {
         if (done) return;
         done = true; clearTimeout(timer);
         video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
         err ? reject(err) : resolve();
       };
       const onSeeked = () => finish();
+      const onError = () => finish(new Error("Falha na leitura do quadro."));
       const timer = setTimeout(() => finish(new Error("Tempo limite ao analisar um quadro.")), 4000);
       video.addEventListener("seeked", onSeeked, { once: true });
+      video.addEventListener("error", onError, { once: true });
+      video.currentTime = t;
     });
     try {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -201,6 +348,7 @@ function renderizarResultados(points) {
   $("resultsContainer").querySelectorAll(".btn-download").forEach(btn => btn.addEventListener("click", () => gravarParte(Number(btn.dataset.start), Number(btn.dataset.end), Number(btn.dataset.part), btn)));
 }
 function previsualizarParte(start, end) {
+  if (analysisBusy || extractionBusy || !previewAvailable) return;
   const player = $("previewPlayer");
   if (stopTimeListener) player.removeEventListener("timeupdate", stopTimeListener);
   player.currentTime = start;
@@ -214,22 +362,15 @@ function previsualizarParte(start, end) {
   player.addEventListener("timeupdate", stopTimeListener);
 }
 async function gravarParte(start, end, partNum, btn) {
-  if (extractionBusy) { setStatus("Aguarde: outra parte já está sendo extraída."); return; }
+  if (analysisBusy || extractionBusy) { setStatus("Aguarde a operação atual terminar."); return; }
   if (!sourceFile) { alert("Selecione e analise o vídeo novamente."); return; }
   extractionBusy = true;
+  updateControls();
   const originalText = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Preparando...";
   try {
-    const engine = await loadFFmpeg();
-    sourceInputName = "smartsplit_input." + outputExtension;
-    if (loadedSourceFile !== sourceFile) {
-      setStatus("Carregando o vídeo original uma única vez na memória de corte...");
-      try { await engine.deleteFile(sourceInputName); } catch (_) {}
-      const inputData = new Uint8Array(await sourceFile.arrayBuffer());
-      await engine.writeFile(sourceInputName, inputData);
-      loadedSourceFile = sourceFile;
-    }
+    const engine = await prepareSource();
     const outputName = "smartsplit_parte_" + partNum + "." + outputExtension;
     try { await engine.deleteFile(outputName); } catch (_) {}
     const duration = Math.max(.1, end - start);
@@ -257,26 +398,28 @@ async function gravarParte(start, end, partNum, btn) {
     link.textContent = "⬇ Baixar parte " + partNum;
     link.style.textAlign = "center";
     link.style.textDecoration = "none";
-    link.addEventListener("click", () => {
-      setTimeout(() => {
-        URL.revokeObjectURL(url);
-        downloadUrls = downloadUrls.filter(item => item !== url);
-      }, 120000);
-    }, { once: true });
     btn.replaceWith(link);
     try { await engine.deleteFile(outputName); } catch (_) {}
     setStatus("Parte " + partNum + " pronta. Toque no botão verde 'Baixar parte " + partNum + "' para salvar no aparelho.");
-    btn.textContent = "Arquivo pronto ✓";
   } catch (error) {
+    try { if (ffmpeg && ffmpeg.loaded) await ffmpeg.deleteFile("smartsplit_parte_" + partNum + "." + outputExtension); } catch (_) {}
     setStatus("Falha na extração: " + (error.message || error) + "\nTente um vídeo MP4 comum e mantenha esta página aberta.");
     btn.textContent = "Tentar novamente";
   } finally {
-    btn.disabled = false;
     extractionBusy = false;
-    if (btn.textContent !== "Concluído ✓" && btn.textContent !== "Tentar novamente") btn.textContent = originalText;
+    updateControls();
+    if (btn.isConnected && btn.textContent !== "Tentar novamente") btn.textContent = originalText;
   }
 }
 analyzeBtn.addEventListener("click", iniciarAnalise);
+$("videoFile").addEventListener("change", () => {
+  if (analysisBusy || extractionBusy) return;
+  clearPreview();
+  clearDownloads();
+  sourceFile = null;
+  $("previewNotice").hidden = true;
+  progressBox.style.display = "none";
+});
 window.addEventListener("beforeunload", () => {
   if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
   downloadUrls.forEach(url => URL.revokeObjectURL(url));
