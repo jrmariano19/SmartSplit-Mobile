@@ -33,7 +33,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <body>
 <main class="container">
 <h1>SmartSplit Mobile</h1>
-<p class="subtitle">Análise de cenas e corte direto do vídeo original · v1.2.0</p>
+<p class="subtitle">Análise de cenas e corte direto do vídeo original · v1.2.1</p>
 <div class="form-group">
 <label for="videoFile">Selecione o vídeo:</label>
 <input type="file" id="videoFile" accept="video/*">
@@ -55,7 +55,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <p id="previewNotice" class="note" hidden>O navegador não abriu a prévia. A análise e a extração continuam pelo FFmpeg, preservando o arquivo original.</p>
 <div class="results" id="resultsContainer"></div>
 <canvas id="procCanvas" width="64" height="36" style="display:none"></canvas>
-<p class="note">A primeira extração carrega o mecanismo FFmpeg (cerca de 31 MB). O corte usa cópia dos fluxos originais, sem regravar a reprodução. O tempo e a precisão do ponto de corte podem variar conforme os keyframes do vídeo e a memória do celular.</p>
+<p class="note">A primeira análise carrega o mecanismo FFmpeg (cerca de 31 MB) e prepara o vídeo para corte. Mantenha esta página aberta. O corte usa cópia dos fluxos originais, sem regravar a reprodução. O tempo e a precisão do ponto de corte podem variar conforme os keyframes do vídeo e a memória do celular.</p>
 </main>
 <script type="module">
 import { FFmpeg } from "@ffmpeg/ffmpeg";
@@ -70,7 +70,6 @@ let loadedSourceFile = null;
 let extractionBusy = false;
 let analysisBusy = false;
 let previewAvailable = false;
-let sourceMounted = false;
 let loadedSourcePath = null;
 let downloadUrls = [];
 let sourceInputName = "video_input";
@@ -148,26 +147,31 @@ async function loadFFmpeg() {
   finally { ffmpegLoading = null; }
 }
 async function prepareSource() {
-  const engine = await loadFFmpeg();
-  if (loadedSourceFile === sourceFile) return engine;
-  if (loadedSourceFile) {
-    if (sourceMounted) await engine.unmount("/source");
-    else if (loadedSourcePath) await engine.deleteFile(loadedSourcePath);
+  if (ffmpeg && ffmpeg.loaded && loadedSourceFile === sourceFile) return ffmpeg;
+  if (ffmpeg && ffmpeg.loaded && loadedSourcePath) {
+    await ffmpeg.deleteFile(loadedSourcePath);
   }
   loadedSourceFile = null;
   loadedSourcePath = null;
-  sourceMounted = false;
-  setStatus("Abrindo o vídeo original no FFmpeg...");
-  // WORKERFS reads the File on demand instead of copying hundreds of MB into MEMFS.
+  setStatus("Preparando uma cópia do vídeo para corte (" + (sourceFile.size / 1048576).toFixed(1) + " MB). Mantenha esta página aberta...");
+  let inputData;
   try {
-    try { await engine.createDir("/source"); } catch (_) {}
-    const mounted = await engine.mount("WORKERFS", { files: [sourceFile] }, "/source");
-    if (!mounted) throw new Error("WORKERFS indisponível.");
-    sourceMounted = true;
-    sourceInputName = "/source/" + sourceFile.name;
+    // Read on the page while its Android file-picker permission is still valid.
+    // Never pass the provider-backed File to WORKERFS/FileReaderSync in a worker.
+    inputData = new Uint8Array(await sourceFile.arrayBuffer());
+    if (!inputData.length || inputData.length !== sourceFile.size) throw new Error("Leitura incompleta.");
   } catch (_) {
-    sourceInputName = "smartsplit_input." + outputExtension;
-    await engine.writeFile(sourceInputName, new Uint8Array(await sourceFile.arrayBuffer()));
+    throw new Error("O Android não permitiu ler o arquivo selecionado. Selecione o vídeo novamente. Se ele estiver na nuvem ou em outro aplicativo, salve uma cópia em Downloads e selecione essa cópia.");
+  }
+  const engine = await loadFFmpeg();
+  sourceInputName = "smartsplit_input." + outputExtension;
+  setStatus("Enviando o vídeo preparado ao mecanismo de corte...");
+  try {
+    // writeFile transfers ownership of this buffer; subsequent cuts reuse MEMFS.
+    await engine.writeFile(sourceInputName, inputData);
+  } catch (error) {
+    try { await engine.deleteFile(sourceInputName); } catch (_) {}
+    throw new Error("Não foi possível preparar o vídeo na memória do aparelho. Feche outras abas e tente novamente. " + (error.message || error));
   }
   loadedSourcePath = sourceInputName;
   loadedSourceFile = sourceFile;
@@ -257,11 +261,14 @@ async function iniciarAnalise() {
   sourceFile = file;
   getOutputFormat(file);
   clearDownloads();
+  clearPreview();
   analysisBusy = true;
   updateControls();
   $("previewNotice").hidden = true;
   setStatus("Lendo o vídeo: " + file.name + " (" + (file.size / 1048576).toFixed(1) + " MB)...");
   try {
+    // Cache bytes before visual analysis, so extraction does not reopen a stale File.
+    await prepareSource();
     let duration;
     let useFFmpeg = false;
     try {
@@ -403,7 +410,7 @@ async function gravarParte(start, end, partNum, btn) {
     setStatus("Parte " + partNum + " pronta. Toque no botão verde 'Baixar parte " + partNum + "' para salvar no aparelho.");
   } catch (error) {
     try { if (ffmpeg && ffmpeg.loaded) await ffmpeg.deleteFile("smartsplit_parte_" + partNum + "." + outputExtension); } catch (_) {}
-    setStatus("Falha na extração: " + (error.message || error) + "\nTente um vídeo MP4 comum e mantenha esta página aberta.");
+    setStatus("Falha na extração: " + (error.message || error) + "\nMantenha esta página aberta e tente novamente.");
     btn.textContent = "Tentar novamente";
   } finally {
     extractionBusy = false;
