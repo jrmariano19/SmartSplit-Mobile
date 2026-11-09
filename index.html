@@ -33,10 +33,11 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <body>
 <main class="container">
 <h1>SmartSplit Mobile</h1>
-<p class="subtitle">Análise de cenas e corte direto do vídeo original · v1.2.2</p>
+<p class="subtitle">Análise de cenas e corte direto do vídeo original · v1.2.3</p>
 <div class="form-group">
-<label for="videoFile">Selecione o vídeo:</label>
-<input type="file" id="videoFile" accept="video/*">
+<label for="videoFile">Selecione o vídeo pelo aplicativo Arquivos:</label>
+<input type="file" id="videoFile" aria-describedby="fileHelp">
+<p id="fileHelp" class="note">Escolha o vídeo em Armazenamento interno → Download. Se abriu esta página dentro de outro aplicativo, use o menu ⋮ → Abrir no Chrome e selecione o arquivo novamente.</p>
 </div>
 <div class="form-group">
 <label for="partsCount">Dividir em quantas partes?</label>
@@ -157,6 +158,9 @@ function readWithFileReader(file) {
   });
 }
 async function readSelectedFile(file) {
+  if (!file.type.startsWith("video/") && !/\.(mp4|m4v|mov|mkv|webm|avi|mpeg|mpg|3gp|ts|mts|m2ts)$/i.test(file.name)) {
+    throw new Error("Selecione um arquivo de vídeo, como MP4, MOV, MKV ou WebM.");
+  }
   if (!file.size) throw new Error("O vídeo selecionado está vazio ou ainda não foi baixado no aparelho.");
   const failures = [];
   for (const read of [readWithFileReader, value => value.arrayBuffer()]) {
@@ -170,7 +174,7 @@ async function readSelectedFile(file) {
       failures.push((error.name || "Erro") + ": " + (error.message || error));
     }
   }
-  throw new Error("Não foi possível ler o vídeo. Salve uma cópia em Downloads e selecione-a pelo aplicativo Arquivos. Detalhes: " + failures.join(" | "));
+  throw new Error("Não foi possível ler o vídeo. Abra esta página no Chrome (menu ⋮ → Abrir no Chrome). Em Meus Arquivos, copie o vídeo para Armazenamento interno → Download e selecione essa cópia. Detalhes: " + failures.join(" | "));
 }
 function beginSelectionRead(file) {
   const selection = { file, promise: null };
