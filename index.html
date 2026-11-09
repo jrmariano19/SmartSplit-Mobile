@@ -33,7 +33,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <body>
 <main class="container">
 <h1>SmartSplit Mobile</h1>
-<p class="subtitle">Análise de cenas e corte direto do vídeo original · v1.2.1</p>
+<p class="subtitle">Análise de cenas e corte direto do vídeo original · v1.2.2</p>
 <div class="form-group">
 <label for="videoFile">Selecione o vídeo:</label>
 <input type="file" id="videoFile" accept="video/*">
@@ -66,6 +66,7 @@ let stopTimeListener = null;
 let ffmpeg = null;
 let ffmpegLoading = null;
 let sourceFile = null;
+let selectedRead = null;
 let loadedSourceFile = null;
 let extractionBusy = false;
 let analysisBusy = false;
@@ -146,6 +147,44 @@ async function loadFFmpeg() {
   try { return await ffmpegLoading; }
   finally { ffmpegLoading = null; }
 }
+function readWithFileReader(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Falha de leitura."));
+    reader.onabort = () => reject(new Error("Leitura cancelada."));
+    reader.readAsArrayBuffer(file);
+  });
+}
+async function readSelectedFile(file) {
+  if (!file.size) throw new Error("O vídeo selecionado está vazio ou ainda não foi baixado no aparelho.");
+  const failures = [];
+  for (const read of [readWithFileReader, value => value.arrayBuffer()]) {
+    try {
+      const buffer = await read(file);
+      if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== file.size) {
+        throw new Error("Leitura incompleta.");
+      }
+      return new Uint8Array(buffer);
+    } catch (error) {
+      failures.push((error.name || "Erro") + ": " + (error.message || error));
+    }
+  }
+  throw new Error("Não foi possível ler o vídeo. Salve uma cópia em Downloads e selecione-a pelo aplicativo Arquivos. Detalhes: " + failures.join(" | "));
+}
+function beginSelectionRead(file) {
+  const selection = { file, promise: null };
+  selectedRead = selection;
+  setStatus("Lendo o arquivo selecionado (" + (file.size / 1048576).toFixed(1) + " MB). Aguarde...");
+  // Always settle to a value so a failure before the Analyze click is handled.
+  selection.promise = readSelectedFile(file).then(data => {
+    if (selectedRead === selection && !analysisBusy) setStatus("Vídeo lido. Toque em Analisar e Dividir.");
+    return { data };
+  }, error => {
+    if (selectedRead === selection && !analysisBusy) setStatus(error.message);
+    return { error };
+  });
+}
 async function prepareSource() {
   if (ffmpeg && ffmpeg.loaded && loadedSourceFile === sourceFile) return ffmpeg;
   if (ffmpeg && ffmpeg.loaded && loadedSourcePath) {
@@ -154,15 +193,11 @@ async function prepareSource() {
   loadedSourceFile = null;
   loadedSourcePath = null;
   setStatus("Preparando uma cópia do vídeo para corte (" + (sourceFile.size / 1048576).toFixed(1) + " MB). Mantenha esta página aberta...");
-  let inputData;
-  try {
-    // Read on the page while its Android file-picker permission is still valid.
-    // Never pass the provider-backed File to WORKERFS/FileReaderSync in a worker.
-    inputData = new Uint8Array(await sourceFile.arrayBuffer());
-    if (!inputData.length || inputData.length !== sourceFile.size) throw new Error("Leitura incompleta.");
-  } catch (_) {
-    throw new Error("O Android não permitiu ler o arquivo selecionado. Selecione o vídeo novamente. Se ele estiver na nuvem ou em outro aplicativo, salve uma cópia em Downloads e selecione essa cópia.");
-  }
+  // Selection starts the read immediately; never reopen the provider after analysis.
+  if (!selectedRead || selectedRead.file !== sourceFile) beginSelectionRead(sourceFile);
+  const prepared = await selectedRead.promise;
+  if (prepared.error) throw prepared.error;
+  const inputData = prepared.data;
   const engine = await loadFFmpeg();
   sourceInputName = "smartsplit_input." + outputExtension;
   setStatus("Enviando o vídeo preparado ao mecanismo de corte...");
@@ -175,6 +210,7 @@ async function prepareSource() {
   }
   loadedSourcePath = sourceInputName;
   loadedSourceFile = sourceFile;
+  selectedRead = null;
   return engine;
 }
 async function readBrowserMetadata(player, file) {
@@ -424,8 +460,11 @@ $("videoFile").addEventListener("change", () => {
   clearPreview();
   clearDownloads();
   sourceFile = null;
+  selectedRead = null;
   $("previewNotice").hidden = true;
   progressBox.style.display = "none";
+  const file = $("videoFile").files[0];
+  if (file) beginSelectionRead(file);
 });
 window.addEventListener("beforeunload", () => {
   if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
