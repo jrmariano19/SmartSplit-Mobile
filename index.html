@@ -28,17 +28,24 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 .btn-preview{background:#334155}.btn-download{background:var(--accent);color:#052e16}
 #previewPlayer{width:100%;border-radius:10px;margin-top:12px;display:none;background:#000}
 .note{font-size:.76rem;color:var(--muted);line-height:1.45;margin-top:12px}
+.tabs{display:flex;gap:8px;margin:16px 0}.tab{flex:1;padding:12px;border:1px solid var(--border);border-radius:10px;background:#0f172a;color:white;font-weight:700;cursor:pointer}.tab[aria-pressed="true"]{background:var(--primary)}.tab:disabled{opacity:.55}.download-result a{display:block;margin-top:12px}
 </style>
 </head>
 <body>
 <main class="container">
 <h1>SmartSplit Mobile</h1>
-<p class="subtitle">Divisão de vídeos e formatos para redes sociais · v1.3.0</p>
+<p class="subtitle">Divisão de vídeos e formatos para redes sociais · v1.3.1</p>
 <div class="form-group">
 <label for="videoFile">Selecione o vídeo pelo aplicativo Arquivos:</label>
 <input type="file" id="videoFile" aria-describedby="fileHelp">
 <p id="fileHelp" class="note">Escolha o vídeo em Armazenamento interno → Download. Se abriu esta página dentro de outro aplicativo, use o menu ⋮ → Abrir no Chrome e selecione o arquivo novamente.</p>
 </div>
+<nav class="tabs" aria-label="Ferramentas de vídeo">
+<button type="button" class="tab" id="splitTab" aria-pressed="true" aria-controls="splitPanel">✂ Dividir vídeo</button>
+<button type="button" class="tab" id="convertTab" aria-pressed="false" aria-controls="convertPanel">↔ Converter vídeo</button>
+</nav>
+<section id="splitPanel" aria-label="Dividir vídeo">
+<p class="note" style="margin-bottom:15px">Extraia as partes no formato original, sem conversão de imagem. Os cortes podem variar conforme os keyframes.</p>
 <div class="form-group">
 <label for="partsCount">Dividir em quantas partes?</label>
 <input type="number" id="partsCount" min="2" max="20" value="2">
@@ -50,14 +57,17 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <option value="equal">Duração igual</option>
 </select>
 </div>
+<button class="main-btn" id="analyzeBtn" style="margin-top:15px">Analisar e Dividir</button>
+</section>
+<section id="convertPanel" aria-label="Converter vídeo" hidden>
+<p class="note" style="margin-bottom:15px">Converta o vídeo selecionado inteiro para MP4. Para converter uma parte, primeiro baixe essa parte na aba Dividir vídeo e selecione o arquivo acima.</p>
 <div class="form-group">
-<label for="socialFormat">Formato de cada parte:</label>
+<label for="socialFormat">Formato do vídeo convertido:</label>
 <select id="socialFormat">
 <option value="vertical">Vertical 9:16 — Reels, TikTok, Shorts e Status</option>
 <option value="square">Quadrado 1:1 — Feed</option>
 <option value="portrait">Retrato 4:5 — Feed</option>
 <option value="landscape">Horizontal 16:9 — YouTube</option>
-<option value="original">Original — corte rápido, sem conversão</option>
 </select>
 </div>
 <div id="conversionOptions">
@@ -75,15 +85,17 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <option value="1080">1080p — maior resolução e processamento</option>
 </select>
 </div>
-<p class="note">Cada parte será convertida para MP4 com áudio, ao tocar em Extrair arquivo. O corte central pode remover pessoas e legendas nas bordas. A prévia mostra o trecho original, antes da conversão.</p>
+<p class="note">O vídeo será convertido para MP4 com áudio, se houver, ao tocar em Converter para MP4. O corte central pode remover pessoas e legendas nas bordas.</p>
 </div>
-<button class="main-btn" id="analyzeBtn" style="margin-top:15px">Analisar e Dividir</button>
+<button class="main-btn" id="convertBtn" style="margin-top:15px">Converter para MP4</button>
+<div id="conversionResult" class="download-result"></div>
+</section>
 <div id="progressBox" class="progress-box" role="status" aria-live="polite"></div>
 <video id="previewPlayer" controls playsinline></video>
 <p id="previewNotice" class="note" hidden>O navegador não abriu a prévia. A análise e a extração continuam pelo FFmpeg, preservando o arquivo original.</p>
 <div class="results" id="resultsContainer"></div>
 <canvas id="procCanvas" width="64" height="36" style="display:none"></canvas>
-<p class="note">A primeira análise carrega o mecanismo FFmpeg (cerca de 31 MB) e prepara o vídeo para corte. Mantenha esta página aberta. Os formatos sociais convertem cada parte para MP4 (H.264 + AAC) e podem levar vários minutos. No modo Original, o corte rápido copia os fluxos e pode variar conforme os keyframes. A duração de cada parte depende da divisão escolhida; confira o limite da rede antes de publicar.</p>
+<p class="note">A primeira análise carrega o mecanismo FFmpeg (cerca de 31 MB) e prepara o vídeo para corte. Mantenha esta página aberta. A aba Converter vídeo converte o arquivo selecionado para MP4 (H.264 + AAC) e pode levar vários minutos. Na aba Dividir vídeo, o corte rápido copia os fluxos e pode variar conforme os keyframes. A duração de cada parte depende da divisão escolhida; confira o limite da rede antes de publicar.</p>
 </main>
 <script type="module">
 import { FFmpeg } from "@ffmpeg/ffmpeg";
@@ -111,7 +123,7 @@ const analyzeBtn = $("analyzeBtn");
 
 function updateControls() {
   const busy = analysisBusy || extractionBusy;
-  [analyzeBtn, $("videoFile"), $("partsCount"), $("mode"), $("socialFormat"), $("framing"), $("quality")].forEach(el => { el.disabled = busy; });
+  [analyzeBtn, $("videoFile"), $("partsCount"), $("mode"), $("socialFormat"), $("framing"), $("quality"), $("convertBtn"), $("splitTab"), $("convertTab")].forEach(el => { el.disabled = busy; });
   document.querySelectorAll("button.btn-download").forEach(el => { el.disabled = busy; });
   document.querySelectorAll("button.btn-preview").forEach(el => { el.disabled = busy || !previewAvailable; });
 }
@@ -131,6 +143,7 @@ function clearDownloads() {
   downloadUrls.forEach(url => URL.revokeObjectURL(url));
   downloadUrls = [];
   $("resultsContainer").innerHTML = "";
+  $("conversionResult").innerHTML = "";
 }
 
 function setStatus(message) {
@@ -465,12 +478,11 @@ function previsualizarParte(start, end) {
   };
   player.addEventListener("timeupdate", stopTimeListener);
 }
-async function gravarParte(start, end, partNum, btn) {
+async function gravarParte(start, end, partNum, btn, settings = null) {
   if (analysisBusy || extractionBusy) { setStatus("Aguarde a operação atual terminar."); return; }
   if (!sourceFile) { alert("Selecione e analise o vídeo novamente."); return; }
   extractionBusy = true;
   updateControls();
-  const settings = socialExportSettings();
   const extension = settings ? "mp4" : outputExtension;
   const outputName = "smartsplit_parte_" + partNum + "." + extension;
   const originalText = btn.textContent;
@@ -481,7 +493,7 @@ async function gravarParte(start, end, partNum, btn) {
     try { await engine.deleteFile(outputName); } catch (_) {}
     const duration = Math.max(.1, end - start);
     const message = settings
-      ? "Convertendo parte " + partNum + " para MP4 " + settings.width + " × " + settings.height + ". Mantenha a tela ligada; isso pode levar vários minutos."
+      ? "Convertendo vídeo para MP4 " + settings.width + " × " + settings.height + ". Mantenha a tela ligada; isso pode levar vários minutos."
       : "Cortando parte " + partNum + " de forma direta, preservando áudio e vídeo. Aguarde...";
     setStatus(message);
     const onProgress = ({ time }) => {
@@ -490,11 +502,17 @@ async function gravarParte(start, end, partNum, btn) {
         setStatus(message + "\nProgresso aproximado: " + percent + "%");
       }
     };
+    const errorLogs = [];
+    const onLog = ({ message }) => {
+      if (/error|invalid|failed|not found|memory|unsupported/i.test(message || "")) errorLogs.push(message);
+      if (errorLogs.length > 3) errorLogs.shift();
+    };
+    engine.on("log", onLog);
     engine.on("progress", onProgress);
     let result;
     try { result = await engine.exec(extractionArgs(start, duration, outputName, settings)); }
-    finally { engine.off("progress", onProgress); }
-    if (result !== 0) throw new Error("O FFmpeg não conseguiu cortar este trecho. Pode haver incompatibilidade de formato ou codec.");
+    finally { engine.off("progress", onProgress); engine.off("log", onLog); }
+    if (result !== 0) throw new Error((settings ? "Não foi possível converter o vídeo." : "Não foi possível extrair o trecho no formato original.") + (errorLogs.length ? " Detalhes: " + errorLogs.join(" | ") : " Pode haver incompatibilidade de formato ou falta de memória."));
     const data = await engine.readFile(outputName);
     if (!data || !data.length) throw new Error("O arquivo extraído ficou vazio.");
     const blob = new Blob([data], { type: settings ? "video/mp4" : outputMime });
@@ -504,15 +522,17 @@ async function gravarParte(start, end, partNum, btn) {
     link.className = "btn-small btn-download";
     link.href = url;
     link.download = "SmartSplit_parte_" + partNum + (settings ? "_" + settings.format : "") + "." + extension;
-    link.textContent = "⬇ Baixar parte " + partNum;
+    link.textContent = settings ? "⬇ Baixar vídeo MP4" : "⬇ Baixar parte " + partNum;
+    if (settings) link.download = "SmartSplit_convertido_" + settings.format + ".mp4";
     link.style.textAlign = "center";
     link.style.textDecoration = "none";
-    btn.replaceWith(link);
+    if (settings) $("conversionResult").replaceChildren(link);
+    else btn.replaceWith(link);
     try { await engine.deleteFile(outputName); } catch (_) {}
-    setStatus("Parte " + partNum + " pronta. Toque no botão verde 'Baixar parte " + partNum + "' para salvar no aparelho.");
+    setStatus(settings ? "Conversão concluída. Toque em Baixar vídeo MP4 para salvar no aparelho." : "Parte " + partNum + " pronta. Toque no botão verde 'Baixar parte " + partNum + "' para salvar no aparelho.");
   } catch (error) {
     try { if (ffmpeg && ffmpeg.loaded) await ffmpeg.deleteFile(outputName); } catch (_) {}
-    setStatus("Falha na extração: " + (error.message || error) + "\nMantenha esta página aberta e tente novamente.");
+    setStatus((settings ? "Falha na conversão: " : "Falha na extração: ") + (error.message || error) + "\nMantenha esta página aberta e tente novamente.");
     btn.textContent = "Tentar novamente";
   } finally {
     extractionBusy = false;
@@ -520,11 +540,40 @@ async function gravarParte(start, end, partNum, btn) {
     if (btn.isConnected && btn.textContent !== "Tentar novamente") btn.textContent = originalText;
   }
 }
+function selectTool(convert) {
+  if (analysisBusy || extractionBusy) return;
+  clearPreview();
+  clearDownloads();
+  $("previewNotice").hidden = true;
+  progressBox.style.display = "none";
+  $("splitPanel").hidden = convert;
+  $("convertPanel").hidden = !convert;
+  $("splitTab").setAttribute("aria-pressed", String(!convert));
+  $("convertTab").setAttribute("aria-pressed", String(convert));
+  updateControls();
+}
+$("splitTab").addEventListener("click", () => selectTool(false));
+$("convertTab").addEventListener("click", () => selectTool(true));
 ["socialFormat", "framing", "quality"].forEach(id => $(id).addEventListener("change", () => {
   clearDownloads();
-  $("conversionOptions").hidden = $("socialFormat").value === "original";
-  if (sourceFile) setStatus("Formato alterado. Toque em Analisar e Dividir para preparar as partes novamente.");
+  progressBox.style.display = "none";
 }));
+$("convertBtn").addEventListener("click", async () => {
+  if (analysisBusy || extractionBusy) return;
+  const file = $("videoFile").files[0];
+  if (!file) { alert("Selecione um vídeo primeiro."); return; }
+  sourceFile = file;
+  getOutputFormat(file);
+  clearPreview();
+  clearDownloads();
+  analysisBusy = true;
+  updateControls();
+  let duration;
+  try { duration = await readFFmpegDuration(); }
+  catch (error) { setStatus("Não foi possível preparar a conversão: " + (error.message || error)); }
+  finally { analysisBusy = false; updateControls(); }
+  if (duration) await gravarParte(0, duration, 1, $("convertBtn"), socialExportSettings());
+});
 analyzeBtn.addEventListener("click", iniciarAnalise);
 $("videoFile").addEventListener("change", () => {
   if (analysisBusy || extractionBusy) return;
