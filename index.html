@@ -34,7 +34,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <body>
 <main class="container">
 <h1>SmartSplit Mobile</h1>
-<p class="subtitle">Divisão de vídeos e formatos para redes sociais · v1.3.1</p>
+<p class="subtitle">Divisão de vídeos e formatos para redes sociais · v1.3.2</p>
 <div class="form-group">
 <label for="videoFile">Selecione o vídeo pelo aplicativo Arquivos:</label>
 <input type="file" id="videoFile" aria-describedby="fileHelp">
@@ -540,6 +540,64 @@ async function gravarParte(start, end, partNum, btn, settings = null) {
     if (btn.isConnected && btn.textContent !== "Tentar novamente") btn.textContent = originalText;
   }
 }
+// AV1 is demuxable but not software-decodable in the bundled FFmpeg core.
+// Route only AV1 through WebCodecs; keep the existing split path untouched.
+async function convertAv1InBrowser(file, settings) {
+  const media = await import("mediabunny");
+  const input = new media.Input({ source: new media.BlobSource(file), formats: media.ALL_FORMATS });
+  let conversion = null;
+  let output = null;
+  let completed = false;
+  try {
+    let video;
+    try { video = await input.getPrimaryVideoTrack(); }
+    catch (_) { return null; } // Other containers may still be supported by FFmpeg.
+    if (!video || await video.getCodec() !== "av1") return null;
+    setStatus("Vídeo AV1 identificado. Verificando a compatibilidade deste navegador...");
+    if (!(await video.canDecode())) {
+      throw new Error("Este vídeo usa AV1. O navegador deste aparelho não disponibilizou um decodificador compatível. Abra no Chrome atualizado. Se a mensagem continuar, este aparelho precisa de conversão externa para H.264; repetir no FFmpeg não resolve.");
+    }
+    if (!(await media.canEncodeVideo("avc", { width: settings.width, height: settings.height }))) {
+      throw new Error("O navegador não consegue gerar H.264 nesta resolução. Tente 720p no Chrome atualizado.");
+    }
+    const audio = await input.getPrimaryAudioTrack();
+    if (audio && !(await audio.canDecode())) {
+      throw new Error("O navegador não consegue ler o áudio deste vídeo. A conversão foi interrompida para não gerar um arquivo sem som.");
+    }
+    if (audio && !(await media.canEncodeAudio("aac", { numberOfChannels: 2, sampleRate: 48000 }))) {
+      const { registerAacEncoder } = await import("@mediabunny/aac-encoder");
+      registerAacEncoder();
+    }
+    // Free the legacy whole-file cache before decoding a long AV1 file.
+    if (ffmpeg) ffmpeg.terminate();
+    ffmpeg = null;
+    loadedSourceFile = null;
+    loadedSourcePath = null;
+    selectedRead = null;
+    output = new media.Output({ format: new media.Mp4OutputFormat({ fastStart: "in-memory" }), target: new media.BufferTarget() });
+    conversion = await media.Conversion.init({
+      input, output, tracks: "primary", showWarnings: false,
+      video: { codec: "avc", width: settings.width, height: settings.height,
+        fit: settings.framing === "fill" ? "cover" : "contain", frameRate: 30,
+        quality: media.QUALITY_MEDIUM, forceTranscode: true },
+      audio: { codec: "aac", numberOfChannels: 2, sampleRate: 48000, forceTranscode: true }
+    });
+    const lostTrack = conversion.discardedTracks.find(item =>
+      !["max_track_count_reached", "max_track_count_of_type_reached"].includes(item.reason));
+    if (!conversion.isValid || lostTrack) {
+      throw new Error("O navegador não conseguiu preparar vídeo e áudio compatíveis. Nenhum arquivo incompleto foi liberado." + (lostTrack ? " Detalhe: " + lostTrack.reason : ""));
+    }
+    conversion.onProgress = progress => setStatus("Convertendo AV1 para MP4 H.264 com áudio, se houver. Mantenha esta página aberta.\nProgresso: " + Math.min(99, Math.max(0, Math.floor(progress * 100))) + "%");
+    await conversion.execute();
+    if (!output.target.buffer?.byteLength) throw new Error("O conversor não gerou um arquivo válido.");
+    completed = true;
+    return new Blob([output.target.buffer], { type: "video/mp4" });
+  } finally {
+    if (!completed && conversion) { try { await conversion.cancel(); } catch (_) {} }
+    else if (!completed && output) { try { await output.cancel(); } catch (_) {} }
+    input.dispose();
+  }
+}
 function selectTool(convert) {
   if (analysisBusy || extractionBusy) return;
   clearPreview();
@@ -566,13 +624,36 @@ $("convertBtn").addEventListener("click", async () => {
   getOutputFormat(file);
   clearPreview();
   clearDownloads();
+  const settings = socialExportSettings();
+  const button = $("convertBtn");
+  button.textContent = "Preparando conversão...";
   analysisBusy = true;
   updateControls();
   let duration;
-  try { duration = await readFFmpegDuration(); }
-  catch (error) { setStatus("Não foi possível preparar a conversão: " + (error.message || error)); }
-  finally { analysisBusy = false; updateControls(); }
-  if (duration) await gravarParte(0, duration, 1, $("convertBtn"), socialExportSettings());
+  try {
+    setStatus("Identificando o formato do vídeo...");
+    const converted = await convertAv1InBrowser(file, settings);
+    if (converted) {
+      const url = URL.createObjectURL(converted);
+      downloadUrls.push(url);
+      const link = document.createElement("a");
+      link.className = "btn-small btn-download";
+      link.href = url;
+      link.download = "SmartSplit_convertido_" + settings.format + ".mp4";
+      link.textContent = "⬇ Baixar vídeo MP4";
+      $("conversionResult").replaceChildren(link);
+      setStatus("Conversão AV1 concluída. Toque em Baixar vídeo MP4 para salvar no aparelho.");
+    } else {
+      duration = await readFFmpegDuration();
+    }
+  } catch (error) {
+    setStatus("Não foi possível converter: " + (error.message || error));
+  } finally {
+    analysisBusy = false;
+    button.textContent = "Converter para MP4";
+    updateControls();
+  }
+  if (duration) await gravarParte(0, duration, 1, button, settings);
 });
 analyzeBtn.addEventListener("click", iniciarAnalise);
 $("videoFile").addEventListener("change", () => {
