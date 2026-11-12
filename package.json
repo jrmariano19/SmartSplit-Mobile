@@ -1,7 +1,7 @@
 {
   "name": "smartsplit-mobile",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,7 @@
     "@ffmpeg/ffmpeg": "0.12.10",
     "@ffmpeg/util": "0.12.2",
     "@mediabunny/aac-encoder": "1.65.2",
+    "@zip.js/zip.js": "2.24.0",
     "mediabunny": "1.65.2"
   },
   "devDependencies": {
