@@ -34,7 +34,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <body>
 <main class="container">
 <h1>SmartSplit Mobile</h1>
-<p class="subtitle">Divisão de vídeos e formatos para redes sociais · v1.3.2</p>
+<p class="subtitle">Divisão de vídeos e formatos para redes sociais · v1.4.0</p>
 <div class="form-group">
 <label for="videoFile">Selecione o vídeo pelo aplicativo Arquivos:</label>
 <input type="file" id="videoFile" aria-describedby="fileHelp">
@@ -60,7 +60,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <button class="main-btn" id="analyzeBtn" style="margin-top:15px">Analisar e Dividir</button>
 </section>
 <section id="convertPanel" aria-label="Converter vídeo" hidden>
-<p class="note" style="margin-bottom:15px">Converta o vídeo selecionado inteiro para MP4. Para converter uma parte, primeiro baixe essa parte na aba Dividir vídeo e selecione o arquivo acima.</p>
+<p class="note" style="margin-bottom:15px">Selecione até dois vídeos de uma vez. Confira a ordem na fila: os arquivos serão convertidos um após o outro e numerados 01 e 02, sem juntar os vídeos. Para converter uma parte, primeiro baixe essa parte na aba Dividir vídeo e selecione o arquivo acima.</p>
 <div class="form-group">
 <label for="socialFormat">Formato do vídeo convertido:</label>
 <select id="socialFormat">
@@ -87,7 +87,8 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 </div>
 <p class="note">O vídeo será convertido para MP4 com áudio, se houver, ao tocar em Converter para MP4. O corte central pode remover pessoas e legendas nas bordas.</p>
 </div>
-<button class="main-btn" id="convertBtn" style="margin-top:15px">Converter para MP4</button>
+<div id="conversionQueue" class="results" aria-label="Ordem dos vídeos"></div>
+<button class="main-btn" id="convertBtn" style="margin-top:15px">Converter fila para MP4</button>
 <div id="conversionResult" class="download-result"></div>
 </section>
 <div id="progressBox" class="progress-box" role="status" aria-live="polite"></div>
@@ -116,6 +117,8 @@ let downloadUrls = [];
 let sourceInputName = "video_input";
 let outputExtension = "mp4";
 let outputMime = "video/mp4";
+let conversionFiles = [];
+let queueStatusPrefix = "";
 
 const $ = (id) => document.getElementById(id);
 const progressBox = $("progressBox");
@@ -124,6 +127,7 @@ const analyzeBtn = $("analyzeBtn");
 function updateControls() {
   const busy = analysisBusy || extractionBusy;
   [analyzeBtn, $("videoFile"), $("partsCount"), $("mode"), $("socialFormat"), $("framing"), $("quality"), $("convertBtn"), $("splitTab"), $("convertTab")].forEach(el => { el.disabled = busy; });
+  document.querySelectorAll("button.queue-move").forEach(el => { el.disabled = busy; });
   document.querySelectorAll("button.btn-download").forEach(el => { el.disabled = busy; });
   document.querySelectorAll("button.btn-preview").forEach(el => { el.disabled = busy || !previewAvailable; });
 }
@@ -148,7 +152,7 @@ function clearDownloads() {
 
 function setStatus(message) {
   progressBox.style.display = "block";
-  progressBox.textContent = message;
+  progressBox.textContent = queueStatusPrefix + message;
 }
 function formatTime(sec) {
   const h = Math.floor(sec / 3600).toString().padStart(2, "0");
@@ -598,12 +602,156 @@ async function convertAv1InBrowser(file, settings) {
     input.dispose();
   }
 }
+function renderConversionQueue() {
+  const container = $("conversionQueue");
+  container.replaceChildren();
+  conversionFiles.forEach((file, index) => {
+    const card = document.createElement("section");
+    card.className = "scene-card";
+    const title = document.createElement("p");
+    title.textContent = String(index + 1).padStart(2, "0") + " — " + file.name;
+    title.style.overflowWrap = "anywhere";
+    card.append(title);
+    if (conversionFiles.length === 2) {
+      const move = document.createElement("button");
+      move.type = "button";
+      move.className = "btn-small queue-move";
+      move.style.background = "#334155";
+      move.textContent = index === 0 ? "↓ Passar para segundo" : "↑ Passar para primeiro";
+      move.addEventListener("click", () => {
+        if (analysisBusy || extractionBusy) return;
+        conversionFiles.reverse();
+        clearDownloads();
+        renderConversionQueue();
+      });
+      card.append(move);
+    }
+    container.append(card);
+  });
+}
+function selectConversionFiles(files) {
+  conversionFiles = [];
+  if (files.length > 2) {
+    $("videoFile").value = "";
+    setStatus("Selecione no máximo dois vídeos por fila.");
+  } else {
+    // Numeric filename order is deterministic even when Android returns a different selection order.
+    conversionFiles = Array.from(files).sort((a, b) => a.name.localeCompare(b.name, "pt-BR", { numeric: true }));
+  }
+  renderConversionQueue();
+}
+async function convertFileToMp4(file, settings) {
+  sourceFile = file;
+  getOutputFormat(file);
+  selectedRead = null;
+  const nativeResult = await convertAv1InBrowser(file, settings);
+  if (nativeResult) return nativeResult;
+  const duration = await readFFmpegDuration();
+  const engine = await prepareSource();
+  const outputName = "smartsplit_conversion.mp4";
+  const errors = [];
+  const onLog = ({ message }) => {
+    if (/error|invalid|failed|not found|memory|unsupported/i.test(message || "")) errors.push(message);
+    if (errors.length > 3) errors.shift();
+  };
+  const onProgress = ({ time }) => {
+    if (Number.isFinite(time)) setStatus("Convertendo para MP4... " + Math.max(0, Math.min(99, Math.floor(time / 1000000 / duration * 100))) + "%");
+  };
+  engine.on("log", onLog);
+  engine.on("progress", onProgress);
+  try {
+    try { await engine.deleteFile(outputName); } catch (_) {}
+    const result = await engine.exec(extractionArgs(0, duration, outputName, settings));
+    if (result !== 0) throw new Error("Falha na conversão. " + errors.join(" | "));
+    const data = await engine.readFile(outputName);
+    if (!data?.length) throw new Error("O conversor não gerou um arquivo válido.");
+    return new Blob([data], { type: "video/mp4" });
+  } finally {
+    engine.off("log", onLog);
+    engine.off("progress", onProgress);
+    try { await engine.deleteFile(outputName); } catch (_) {}
+    if (loadedSourcePath) { try { await engine.deleteFile(loadedSourcePath); } catch (_) {} }
+    loadedSourceFile = null;
+    loadedSourcePath = null;
+    selectedRead = null;
+  }
+}
+function queueDownloadName(file, index, settings) {
+  const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^\p{L}\p{N}_-]/gu, "_").slice(0, 80);
+  return String(index + 1).padStart(2, "0") + "_" + stem + "_" + settings.format + ".mp4";
+}
+async function runConversionQueue() {
+  if (analysisBusy || extractionBusy) return;
+  if (!conversionFiles.length) { alert("Selecione um ou dois vídeos primeiro."); return; }
+  const files = [...conversionFiles];
+  const settings = socialExportSettings();
+  clearPreview();
+  clearDownloads();
+  analysisBusy = true;
+  const button = $("convertBtn");
+  button.textContent = "Convertendo fila...";
+  updateControls();
+  let completed = 0;
+  try {
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index];
+      queueStatusPrefix = "Vídeo " + (index + 1) + " de " + files.length + " — " + file.name + "\n";
+      const card = document.createElement("section");
+      card.className = "scene-card";
+      const status = document.createElement("p");
+      status.textContent = String(index + 1).padStart(2, "0") + " — " + file.name + ": convertendo...";
+      status.style.overflowWrap = "anywhere";
+      card.append(status);
+      $("conversionResult").append(card);
+      try {
+        setStatus("Preparando conversão...");
+        const blob = await convertFileToMp4(file, settings);
+        const url = URL.createObjectURL(blob);
+        downloadUrls.push(url);
+        const link = document.createElement("a");
+        link.className = "btn-small btn-download";
+        link.href = url;
+        link.download = queueDownloadName(file, index, settings);
+        link.textContent = "⬇ Baixar vídeo " + String(index + 1).padStart(2, "0");
+        status.textContent = String(index + 1).padStart(2, "0") + " — " + file.name + ": pronto";
+        card.append(link);
+        completed++;
+      } catch (error) {
+        status.textContent = String(index + 1).padStart(2, "0") + " — " + file.name + ": " + (error.message || error);
+        // A failed engine must not poison the next file in the queue.
+        if (ffmpeg) ffmpeg.terminate();
+        ffmpeg = null;
+        loadedSourceFile = null;
+        loadedSourcePath = null;
+        selectedRead = null;
+      }
+    }
+    queueStatusPrefix = "";
+    setStatus("Fila concluída: " + completed + " de " + files.length + " vídeos convertidos. " +
+      (completed === files.length ? "Baixe os arquivos numerados na ordem 01, 02." : "Confira o erro no cartão do vídeo que não foi convertido. Os arquivos prontos continuam disponíveis."));
+  } finally {
+    queueStatusPrefix = "";
+    analysisBusy = false;
+    button.textContent = "Converter fila para MP4";
+    updateControls();
+  }
+}
 function selectTool(convert) {
   if (analysisBusy || extractionBusy) return;
   clearPreview();
   clearDownloads();
   $("previewNotice").hidden = true;
   progressBox.style.display = "none";
+  $("videoFile").multiple = convert;
+  if (!convert && $("videoFile").files.length > 1) {
+    $("videoFile").value = "";
+    sourceFile = null;
+    selectedRead = null;
+  }
+  if (convert) selectConversionFiles($("videoFile").files);
+  else { conversionFiles = []; renderConversionQueue(); }
+  document.querySelector('label[for="videoFile"]').textContent = convert
+    ? "Selecione um ou dois vídeos pelo aplicativo Arquivos:" : "Selecione o vídeo pelo aplicativo Arquivos:";
   $("splitPanel").hidden = convert;
   $("convertPanel").hidden = !convert;
   $("splitTab").setAttribute("aria-pressed", String(!convert));
@@ -616,45 +764,7 @@ $("convertTab").addEventListener("click", () => selectTool(true));
   clearDownloads();
   progressBox.style.display = "none";
 }));
-$("convertBtn").addEventListener("click", async () => {
-  if (analysisBusy || extractionBusy) return;
-  const file = $("videoFile").files[0];
-  if (!file) { alert("Selecione um vídeo primeiro."); return; }
-  sourceFile = file;
-  getOutputFormat(file);
-  clearPreview();
-  clearDownloads();
-  const settings = socialExportSettings();
-  const button = $("convertBtn");
-  button.textContent = "Preparando conversão...";
-  analysisBusy = true;
-  updateControls();
-  let duration;
-  try {
-    setStatus("Identificando o formato do vídeo...");
-    const converted = await convertAv1InBrowser(file, settings);
-    if (converted) {
-      const url = URL.createObjectURL(converted);
-      downloadUrls.push(url);
-      const link = document.createElement("a");
-      link.className = "btn-small btn-download";
-      link.href = url;
-      link.download = "SmartSplit_convertido_" + settings.format + ".mp4";
-      link.textContent = "⬇ Baixar vídeo MP4";
-      $("conversionResult").replaceChildren(link);
-      setStatus("Conversão AV1 concluída. Toque em Baixar vídeo MP4 para salvar no aparelho.");
-    } else {
-      duration = await readFFmpegDuration();
-    }
-  } catch (error) {
-    setStatus("Não foi possível converter: " + (error.message || error));
-  } finally {
-    analysisBusy = false;
-    button.textContent = "Converter para MP4";
-    updateControls();
-  }
-  if (duration) await gravarParte(0, duration, 1, button, settings);
-});
+$("convertBtn").addEventListener("click", runConversionQueue);
 analyzeBtn.addEventListener("click", iniciarAnalise);
 $("videoFile").addEventListener("change", () => {
   if (analysisBusy || extractionBusy) return;
@@ -665,7 +775,8 @@ $("videoFile").addEventListener("change", () => {
   $("previewNotice").hidden = true;
   progressBox.style.display = "none";
   const file = $("videoFile").files[0];
-  if (file) beginSelectionRead(file);
+  if (!$("convertPanel").hidden) selectConversionFiles($("videoFile").files);
+  else if (file) beginSelectionRead(file);
 });
 window.addEventListener("beforeunload", () => {
   if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
