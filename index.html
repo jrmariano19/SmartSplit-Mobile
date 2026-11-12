@@ -34,7 +34,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <body>
 <main class="container">
 <h1>SmartSplit Mobile</h1>
-<p class="subtitle">Divisão de vídeos e formatos para redes sociais · v1.4.0</p>
+<p class="subtitle">Divisão de vídeos e formatos para redes sociais · v1.5.0</p>
 <div class="form-group">
 <label for="videoFile">Selecione o vídeo pelo aplicativo Arquivos:</label>
 <input type="file" id="videoFile" aria-describedby="fileHelp">
@@ -60,7 +60,7 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 <button class="main-btn" id="analyzeBtn" style="margin-top:15px">Analisar e Dividir</button>
 </section>
 <section id="convertPanel" aria-label="Converter vídeo" hidden>
-<p class="note" style="margin-bottom:15px">Selecione até dois vídeos de uma vez. Confira a ordem na fila: os arquivos serão convertidos um após o outro e numerados 01 e 02, sem juntar os vídeos. Para converter uma parte, primeiro baixe essa parte na aba Dividir vídeo e selecione o arquivo acima.</p>
+<p class="note" style="margin-bottom:15px">Selecione todos os vídeos que deseja converter. Confira a ordem na fila: eles serão convertidos um após o outro, com nomes numerados. Ao terminar, baixe os MP4 juntos em um ZIP ou separadamente. Para converter uma parte, primeiro baixe essa parte na aba Dividir vídeo e selecione o arquivo acima.</p>
 <div class="form-group">
 <label for="socialFormat">Formato do vídeo convertido:</label>
 <select id="socialFormat">
@@ -89,6 +89,11 @@ input[type=file],input[type=number],select{width:100%;padding:12px;background:#0
 </div>
 <div id="conversionQueue" class="results" aria-label="Ordem dos vídeos"></div>
 <button class="main-btn" id="convertBtn" style="margin-top:15px">Converter fila para MP4</button>
+<div id="batchDownload" class="download-result" hidden>
+<button type="button" class="main-btn" id="zipBtn" style="margin-top:12px">Baixar todos em ZIP</button>
+<div id="zipResult"></div>
+<p class="note" id="zipNotice">O ZIP reúne os vídeos convertidos, mantendo cada MP4 separado e numerado. Filas grandes dependem da memória disponível no celular. Baixe os resultados antes de trocar de aba ou selecionar uma nova fila.</p>
+</div>
 <div id="conversionResult" class="download-result"></div>
 </section>
 <div id="progressBox" class="progress-box" role="status" aria-live="polite"></div>
@@ -117,6 +122,8 @@ let downloadUrls = [];
 let sourceInputName = "video_input";
 let outputExtension = "mp4";
 let outputMime = "video/mp4";
+let convertedFiles = [];
+let zipDownloadUrl = null;
 let conversionFiles = [];
 let queueStatusPrefix = "";
 
@@ -127,6 +134,7 @@ const analyzeBtn = $("analyzeBtn");
 function updateControls() {
   const busy = analysisBusy || extractionBusy;
   [analyzeBtn, $("videoFile"), $("partsCount"), $("mode"), $("socialFormat"), $("framing"), $("quality"), $("convertBtn"), $("splitTab"), $("convertTab")].forEach(el => { el.disabled = busy; });
+  $("zipBtn").disabled = busy || convertedFiles.length === 0;
   document.querySelectorAll("button.queue-move").forEach(el => { el.disabled = busy; });
   document.querySelectorAll("button.btn-download").forEach(el => { el.disabled = busy; });
   document.querySelectorAll("button.btn-preview").forEach(el => { el.disabled = busy || !previewAvailable; });
@@ -146,6 +154,11 @@ function clearPreview() {
 function clearDownloads() {
   downloadUrls.forEach(url => URL.revokeObjectURL(url));
   downloadUrls = [];
+  convertedFiles = [];
+  zipDownloadUrl = null;
+  $("batchDownload").hidden = true;
+  $("zipResult").replaceChildren();
+  $("zipBtn").textContent = "Baixar todos em ZIP";
   $("resultsContainer").innerHTML = "";
   $("conversionResult").innerHTML = "";
 }
@@ -612,15 +625,18 @@ function renderConversionQueue() {
     title.textContent = String(index + 1).padStart(2, "0") + " — " + file.name;
     title.style.overflowWrap = "anywhere";
     card.append(title);
-    if (conversionFiles.length === 2) {
+    for (const delta of [-1, 1]) {
+      const destination = index + delta;
+      if (destination < 0 || destination >= conversionFiles.length) continue;
       const move = document.createElement("button");
       move.type = "button";
       move.className = "btn-small queue-move";
       move.style.background = "#334155";
-      move.textContent = index === 0 ? "↓ Passar para segundo" : "↑ Passar para primeiro";
+      move.textContent = delta === -1 ? "↑ Subir" : "↓ Descer";
+      move.setAttribute("aria-label", move.textContent + " " + file.name);
       move.addEventListener("click", () => {
         if (analysisBusy || extractionBusy) return;
-        conversionFiles.reverse();
+        [conversionFiles[index], conversionFiles[destination]] = [conversionFiles[destination], conversionFiles[index]];
         clearDownloads();
         renderConversionQueue();
       });
@@ -630,14 +646,7 @@ function renderConversionQueue() {
   });
 }
 function selectConversionFiles(files) {
-  conversionFiles = [];
-  if (files.length > 2) {
-    $("videoFile").value = "";
-    setStatus("Selecione no máximo dois vídeos por fila.");
-  } else {
-    // Numeric filename order is deterministic even when Android returns a different selection order.
-    conversionFiles = Array.from(files).sort((a, b) => a.name.localeCompare(b.name, "pt-BR", { numeric: true }));
-  }
+  conversionFiles = Array.from(files).sort((a, b) => a.name.localeCompare(b.name, "pt-BR", { numeric: true }));
   renderConversionQueue();
 }
 async function convertFileToMp4(file, settings) {
@@ -678,11 +687,11 @@ async function convertFileToMp4(file, settings) {
 }
 function queueDownloadName(file, index, settings) {
   const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^\p{L}\p{N}_-]/gu, "_").slice(0, 80);
-  return String(index + 1).padStart(2, "0") + "_" + stem + "_" + settings.format + ".mp4";
+  return String(index + 1).padStart(Math.max(2, String(conversionFiles.length).length), "0") + "_" + stem + "_" + settings.format + ".mp4";
 }
 async function runConversionQueue() {
   if (analysisBusy || extractionBusy) return;
-  if (!conversionFiles.length) { alert("Selecione um ou dois vídeos primeiro."); return; }
+  if (!conversionFiles.length) { alert("Selecione os vídeos primeiro."); return; }
   const files = [...conversionFiles];
   const settings = socialExportSettings();
   clearPreview();
@@ -712,6 +721,8 @@ async function runConversionQueue() {
         link.className = "btn-small btn-download";
         link.href = url;
         link.download = queueDownloadName(file, index, settings);
+        convertedFiles.push({ name: link.download, blob });
+        $("batchDownload").hidden = false;
         link.textContent = "⬇ Baixar vídeo " + String(index + 1).padStart(2, "0");
         status.textContent = String(index + 1).padStart(2, "0") + " — " + file.name + ": pronto";
         card.append(link);
@@ -727,8 +738,9 @@ async function runConversionQueue() {
       }
     }
     queueStatusPrefix = "";
+    $("zipNotice").textContent = "O ZIP incluirá " + completed + " de " + files.length + " vídeos desta fila, separados e numerados. Vídeos com erro não serão incluídos. Baixe antes de trocar de aba ou selecionar outra fila.";
     setStatus("Fila concluída: " + completed + " de " + files.length + " vídeos convertidos. " +
-      (completed === files.length ? "Baixe os arquivos numerados na ordem 01, 02." : "Confira o erro no cartão do vídeo que não foi convertido. Os arquivos prontos continuam disponíveis."));
+      (completed === files.length ? "Toque em Baixar todos em ZIP para salvar os vídeos juntos, na ordem da fila." : "Confira o erro no cartão do vídeo que não foi convertido. Os arquivos prontos continuam disponíveis."));
   } finally {
     queueStatusPrefix = "";
     analysisBusy = false;
@@ -736,6 +748,45 @@ async function runConversionQueue() {
     updateControls();
   }
 }
+async function downloadQueueZip() {
+  if (analysisBusy || extractionBusy || !convertedFiles.length) return;
+  if (zipDownloadUrl) { $("zipResult").querySelector("a")?.click(); return; }
+  analysisBusy = true;
+  updateControls();
+  const button = $("zipBtn");
+  button.textContent = "Preparando ZIP...";
+  const files = [...convertedFiles];
+  let writer;
+  try {
+    const { ZipWriter, BlobWriter, BlobReader } = await import("@zip.js/zip.js");
+    writer = new ZipWriter(new BlobWriter("application/zip"), { level: 0, useWebWorkers: false });
+    for (let i = 0; i < files.length; i++) {
+      setStatus("Preparando ZIP: vídeo " + (i + 1) + " de " + files.length + ". Mantenha esta página aberta...");
+      await writer.add(files[i].name, new BlobReader(files[i].blob), { level: 0 });
+    }
+    const archive = await writer.close();
+    writer = null;
+    zipDownloadUrl = URL.createObjectURL(archive);
+    downloadUrls.push(zipDownloadUrl);
+    const link = document.createElement("a");
+    link.className = "btn-small btn-download";
+    link.href = zipDownloadUrl;
+    link.download = "SmartSplit_videos_em_sequencia.zip";
+    link.textContent = "⬇ Salvar ZIP com " + files.length + " vídeos";
+    $("zipResult").replaceChildren(link);
+    setStatus("ZIP pronto. Toque em Salvar ZIP para baixar todos os vídeos convertidos juntos. Depois, extraia o ZIP no aplicativo Arquivos do celular.");
+    button.textContent = "Baixar ZIP novamente";
+    link.click();
+  } catch (error) {
+    if (writer) { try { await writer.close(); } catch (_) {} }
+    button.textContent = "Tentar gerar ZIP novamente";
+    setStatus("Não foi possível preparar o ZIP: " + (error.message || error) + " Os downloads individuais continuam disponíveis. Se faltar memória, baixe separadamente ou use uma fila menor.");
+  } finally {
+    analysisBusy = false;
+    updateControls();
+  }
+}
+$("zipBtn").addEventListener("click", downloadQueueZip);
 function selectTool(convert) {
   if (analysisBusy || extractionBusy) return;
   clearPreview();
@@ -751,7 +802,7 @@ function selectTool(convert) {
   if (convert) selectConversionFiles($("videoFile").files);
   else { conversionFiles = []; renderConversionQueue(); }
   document.querySelector('label[for="videoFile"]').textContent = convert
-    ? "Selecione um ou dois vídeos pelo aplicativo Arquivos:" : "Selecione o vídeo pelo aplicativo Arquivos:";
+    ? "Selecione todos os vídeos pelo aplicativo Arquivos:" : "Selecione o vídeo pelo aplicativo Arquivos:";
   $("splitPanel").hidden = convert;
   $("convertPanel").hidden = !convert;
   $("splitTab").setAttribute("aria-pressed", String(!convert));
